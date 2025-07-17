@@ -23,7 +23,7 @@ def main():
     
     # Comment out the line after the next line and run the function when you have the following crypto in your wallet:
     # 3 USDC, 0.001 WETH, 0.001 ETH
-    # demo_liquidity_manager()
+    demo_liquidity_manager()
 
 def demo_blockchain_connector():
     # Initialize Blockchain Connector
