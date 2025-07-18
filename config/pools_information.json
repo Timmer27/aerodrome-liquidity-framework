@@ -6,11 +6,10 @@
     "pool_abi": "cl100_weth_usdc_pool_abi.json",
     "nft_address": "0x827922686190790b37229fd06084350E74485b72",
     "nft_abi": "cl100_weth_usdc_nft_abi.json",
-    "gauge_address": "0x827922686190790b37229fd06084350E74485b72",
-    "gauge_abi": "aero_gauge_abi.json"
+    "gauge_address": "0xF33a96b5932D9E9B9A0eDA447AbD8C9d48d2e0c8",
+    "gauge_abi": "cl_gauge_abi.json"
   },
   "AERODROME_VOTER": "0x16613524e02ad97eDfeF371bC883F2F5d6C480A5",
   "AERODROME_ROUTER": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
-  "AERODROME_FACTORY": "0x420DD381b31aEf6683db96b3aCF57B9035F9A2c3",
-  "AERODROME_GAUGE_FACTORY": "0x4f5003fd2234667c3ab4ed2d11ddfd637bc2fb0c"
+  "AERODROME_FACTORY": "0x420DD381b31aEf6683db96b3aCF57B9035F9A2c3"
 }

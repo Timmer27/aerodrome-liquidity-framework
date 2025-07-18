@@ -4,12 +4,11 @@ from utils.blockchain_connector import BlockchainConnector
 
 class LiquidityManager:
     """
-    A flexible class to manage liquidity positions with staking capabilities.
+    A flexible class to manage liquidity positions.
 
     This class handles:
     - Supporting multiple liquidity pools by dynamically loading contracts.
     - Managing liquidity positions (open/close).
-    - Staking and unstaking liquidity for additional rewards.
     """
 
     def __init__(self, pool_name, token0_max, token1_max, lower_range_percentage, upper_range_percentage):
@@ -42,6 +41,8 @@ class LiquidityManager:
         self.pool_contract = self.blockchain_connector.load_contract(self.pool_address, self.pool_info["pool_abi"])
         self.nft_address = self.pool_info["nft_address"]
         self.nft_contract = self.blockchain_connector.load_contract(self.nft_address, self.pool_info["nft_abi"])
+        self.gauge_address = self.pool_info["gauge_address"]
+        self.gauge_contract = self.blockchain_connector.load_contract(self.gauge_address, self.pool_info["gauge_abi"])
         
         # Load token contracts to fetch decimals
         self.token0_address = self.blockchain_connector.token_addresses[self.token0_name]
@@ -58,10 +59,6 @@ class LiquidityManager:
         self.token1_max = token1_max
         self.lower_range_percentage = lower_range_percentage
         self.upper_range_percentage = upper_range_percentage
-
-        # Initialize staking-related attributes
-        self.staked_liquidity = 0
-        self.is_staked = False
 
         self.logger.info(f"Initialized LiquidityManager for pool: {pool_name}")
 
@@ -115,7 +112,6 @@ class LiquidityManager:
         - Current tick
         - Adjusted lower and upper ticks based on specified percentage ranges
         - Current price, lower price, and upper price in the pool
-        - Staking information
 
         Returns:
             dict: A dictionary with the following keys:
@@ -125,10 +121,6 @@ class LiquidityManager:
                 - current_price: The current price of token0 in terms of token1.
                 - lower_price: The price corresponding to the lower tick.
                 - upper_price: The price corresponding to the upper tick.
-                - total_staked_liquidity: Total staked liquidity in the pool.
-                - reward_rate: Current reward rate.
-                - reward_reserve: Current reward reserve.
-                - period_finish: When the current reward period ends.
 
         Raises:
             RuntimeError: If fetching the pool status fails.
@@ -148,16 +140,11 @@ class LiquidityManager:
             lower_tick = raw_lower_tick - self.lower_range_percentage * self.tick_spacing
             upper_tick = raw_upper_tick + self.upper_range_percentage * self.tick_spacing
 
+            
             # Calculate prices
             current_price = self.get_current_price()
             lower_price = self.tick_to_price(lower_tick)
             upper_price = self.tick_to_price(upper_tick)
-
-            # Get staking information
-            total_staked_liquidity = self.pool_contract.functions.stakedLiquidity().call()
-            reward_rate = self.pool_contract.functions.rewardRate().call()
-            reward_reserve = self.pool_contract.functions.rewardReserve().call()
-            period_finish = self.pool_contract.functions.periodFinish().call()
 
             status = {
                 "current_price": current_price,
@@ -166,10 +153,6 @@ class LiquidityManager:
                 "current_tick": current_tick,
                 "lower_tick": lower_tick,
                 "upper_tick": upper_tick,
-                "total_staked_liquidity": total_staked_liquidity,
-                "reward_rate": reward_rate,
-                "reward_reserve": reward_reserve,
-                "period_finish": period_finish,
             }
 
             return status
@@ -193,7 +176,6 @@ class LiquidityManager:
         Raises:
             RuntimeError: If opening the liquidity position fails.
         """
-        
         try:
             # Get pool status to determine ticks and price range
             self.start_pool_status = self.get_pool_status()
@@ -270,161 +252,90 @@ class LiquidityManager:
                 if log.address == self.nft_address and len(log.topics) == 2: # There are two log addresses equal to the nft address, we use this to find the one we need
                     token_id_hex = log.topics[1].hex()
                     self.nft_token_id = int(token_id_hex, 16)
-                    print('self.nft_token_id', self.nft_token_id)
 
             # Return the parsed results in a dictionary
             return {
                 "amount0": self.amount0,
                 "amount1": self.amount1,
-                "nftTokenId": self.nft_token_id,
+                "tokenId": self.nft_token_id,
             }
 
         except Exception as e:
             raise RuntimeError(f"Error parsing mint receipt: {e}")
 
-    def stake_liquidity(self, nft_token_id, liquidity_amount=None):
+    def fetch_staked_liquidity_position_from_nft(self, address=None):
         """
-        Stakes liquidity in the pool to earn additional rewards.
-
-        Args:
-            liquidity_amount (int, optional): Amount of liquidity to stake. If None, stakes all available liquidity.
-
-        Returns:
-            str: Transaction hash of the stake operation.
-
-        Raises:
-            RuntimeError: If staking liquidity fails.
+        아직 stake 되지 않은 (unstake) 자산의 nft token id 반환
         """
+        if not address:
+            address = self.blockchain_connector.public_address
         try:
-            # if not hasattr(self, 'nft_token_id'):
-            #     raise RuntimeError("No liquidity position found. Please open a position first.")
+            nft_qty = self.nft_contract.functions.balanceOf(address).call()
+            nft_token_ids = []
+            for i in range(nft_qty):
+                nft_token = self.nft_contract.functions.tokenOfOwnerByIndex(address, i).call()
+                pos = self.nft_contract.functions.positions(nft_token).call()
 
-            # Get current position information
-            self.start_pool_status = self.get_pool_status()
-            position = self.nft_contract.functions.positions(nft_token_id).call()
-            current_liquidity = position[7]  # Liquidity amount
+                token0 = pos[2].lower()
+                token1 = pos[3].lower()
+                liquidity = pos[7]
+
+                if liquidity > 0:
+                    nft_token_ids.append(nft_token)
+
+            return nft_token_ids
+        except Exception as e:
+            self.logger.error(f"Failed to fetch_staked_liquidity_position_from_gauge: {e}")
+            raise RuntimeError("Failed to fetch_staked_liquidity_position_from_gauge.") from e
+
+    def fetch_staked_liquidity_position_from_gauge(self, address=None):
+        if not address:
+            address = self.blockchain_connector.public_address
+        try:
+            self.logger.info(f"fetch_staked_liquidity_position_from_gauge for wallet address: {address}...")
+            nft_token_ids = self.gauge_contract.functions.stakedValues(address).call()
+            return nft_token_ids
+        except Exception as e:
+            self.logger.error(f"Failed to fetch_staked_liquidity_position_from_gauge: {e}")
+            raise RuntimeError("Failed to fetch_staked_liquidity_position_from_gauge.") from e
+    
+    def stake_liquidity_position_from_nft(self, nft_token_id):
+        # 풀 예치 후 에어로 스테이킹 함수
+        try:
+            self.logger.info(f"stake_liquidity_position_from_nft from nft_token_id: {nft_token_id}...")
             
-            if liquidity_amount is None:
-                liquidity_amount = current_liquidity
+            # 1. gauge에 예치, 즉 스테이킹 할 것이므로 해당 nft 자산을 gauge 주소에 넘기는 것을 승인
+            stake_approve_function = self.nft_contract.functions.approve(self.gauge_address, nft_token_id)
+            tx_hash, receipt = self.blockchain_connector.build_and_send_transaction(stake_approve_function)
+            self.logger.info(f"Approve to Gauge ({self.gauge_address}) TX: {tx_hash}...")
             
-            if liquidity_amount > current_liquidity:
-                raise ValueError(f"Cannot stake more liquidity ({liquidity_amount}) than available ({current_liquidity})")
+            # rpc 노드 무료버전이라 또 너무 빠르면 안됨. 이런 그지같은
+            time.sleep(3)
 
-            # Get position details for tick range
-            lower_tick = self.start_pool_status["lower_tick"]
-            upper_tick = self.start_pool_status["upper_tick"]
-
-            self.logger.info(f"Staking {liquidity_amount} liquidity for Token ID: {nft_token_id}")
-
-            # Build stake transaction
-            stake_function = self.pool_contract.functions.stake(
-                int(liquidity_amount),  # stakedLiquidityDelta (positive for staking)
-                lower_tick,             # tickLower
-                upper_tick,             # tickUpper
-                True                    # positionUpdate
-            )
-
-            # Build and send the transaction
-            tx_hash, receipt = self.blockchain_connector.build_and_send_transaction(stake_function)
+            # 2. gauge에 승인을 넘겼으니, 해당 승인 권한으로 gauge가 자산을 gauge 내 예치
+            stake_deposit_function = self.gauge_contract.functions.deposit(nft_token_id)
+            tx_hash, receipt = self.blockchain_connector.build_and_send_transaction(stake_deposit_function)
+            self.logger.info(f"Liquidity staking successfully. Transaction hash: {tx_hash}")
             
-            # Update internal state
-            self.staked_liquidity += liquidity_amount
-            self.is_staked = True
-
-            self.logger.info(f"Liquidity staked successfully. Transaction hash: {tx_hash}")
             return tx_hash
-
         except Exception as e:
-            self.logger.error(f"Failed to stake liquidity: {e}")
-            raise RuntimeError("Failed to stake liquidity.") from e
-
-    def unstake_liquidity(self, liquidity_amount=None):
-        """
-        Unstakes liquidity from the pool.
-
-        Args:
-            liquidity_amount (int, optional): Amount of liquidity to unstake. If None, unstakes all staked liquidity.
-
-        Returns:
-            str: Transaction hash of the unstake operation.
-
-        Raises:
-            RuntimeError: If unstaking liquidity fails.
-        """
+            self.logger.error(f"Failed to stake_liquidity_position_from_nft: {e}")
+            raise RuntimeError("Failed to stake_liquidity_position_from_nft.") from e
+                
+    def unstaked_liquidity_position_from_gauge(self, nft_token_id: int):
         try:
-            if not hasattr(self, 'nft_token_id'):
-                raise RuntimeError("No liquidity position found. Please open a position first.")
-
-            if not self.is_staked or self.staked_liquidity == 0:
-                raise RuntimeError("No staked liquidity found to unstake.")
-
-            if liquidity_amount is None:
-                liquidity_amount = self.staked_liquidity
-            
-            if liquidity_amount > self.staked_liquidity:
-                raise ValueError(f"Cannot unstake more liquidity ({liquidity_amount}) than staked ({self.staked_liquidity})")
-
-            # Get position details for tick range
-            lower_tick = self.start_pool_status["lower_tick"]
-            upper_tick = self.start_pool_status["upper_tick"]
-
-            self.logger.info(f"Unstaking {liquidity_amount} liquidity for Token ID: {self.nft_token_id}")
-
-            # Build unstake transaction (negative delta for unstaking)
-            unstake_function = self.pool_contract.functions.stake(
-                -int(liquidity_amount),  # stakedLiquidityDelta (negative for unstaking)
-                lower_tick,              # tickLower
-                upper_tick,              # tickUpper
-                True                     # positionUpdate
-            )
-
-            # Build and send the transaction
-            tx_hash, receipt = self.blockchain_connector.build_and_send_transaction(unstake_function)
-            
-            # Update internal state
-            self.staked_liquidity -= liquidity_amount
-            if self.staked_liquidity == 0:
-                self.is_staked = False
-
-            self.logger.info(f"Liquidity unstaked successfully. Transaction hash: {tx_hash}")
+            self.logger.info(f"unstaked_liquidity_position_from_gauge from nft_token_id: {nft_token_id}...")
+            withdraw_function = self.gauge_contract.functions.withdraw(nft_token_id)
+            tx_hash, receipt = self.blockchain_connector.build_and_send_transaction(withdraw_function)
+            self.logger.info(f"Liquidity unstaking successfully. Transaction hash: {tx_hash}")
             return tx_hash
-
         except Exception as e:
-            self.logger.error(f"Failed to unstake liquidity: {e}")
-            raise RuntimeError("Failed to unstake liquidity.") from e
-
-    def get_staking_info(self):
-        """
-        Get detailed information about the staking status.
-
-        Returns:
-            dict: Dictionary containing staking information including:
-                - is_staked: Whether liquidity is currently staked
-                - staked_liquidity: Amount of liquidity staked
-                - total_pool_staked: Total staked liquidity in the pool
-                - reward_rate: Current reward rate
-                - reward_reserve: Available reward reserve
-                - period_finish: When reward period ends
-        """
-        try:
-            pool_status = self.get_pool_status()
-            
-            return {
-                "is_staked": self.is_staked,
-                "staked_liquidity": self.staked_liquidity,
-                "total_pool_staked": pool_status["total_staked_liquidity"],
-                "reward_rate": pool_status["reward_rate"],
-                "reward_reserve": pool_status["reward_reserve"],
-                "period_finish": pool_status["period_finish"],
-            }
-        except Exception as e:
-            self.logger.error(f"Failed to get staking info: {e}")
-            raise RuntimeError("Failed to get staking info.") from e
-
-    def close_liquidity_position(self, amount0Min=0, amount1Min=0, amount0Max=2**128 - 1, amount1Max=2**128 - 1):
+            self.logger.error(f"Failed to unstaked_liquidity_position_from_gauge: {e}")
+            raise RuntimeError("Failed to unstaked_liquidity_position_from_gauge.") from e
+                
+    def close_liquidity_position(self, nft_token_id, public_address=None, amount0Min=0, amount1Min=0, amount0Max=2**128 - 1, amount1Max=2**128 - 1):
         """
         Closes the liquidity position by:
-        - Unstaking any staked liquidity first
         - Decreasing liquidity to release tokens.
         - Collecting accrued fees.
         - Burning the NFT associated with the liquidity position.
@@ -434,42 +345,44 @@ class LiquidityManager:
             amount1Min (int, optional): Minimum amount of token1 to receive when decreasing liquidity. Defaults to 0.
             amount0Max (int, optional): Maximum amount of token0 to collect as fees. Defaults to 2**128 - 1.
             amount1Max (int, optional): Maximum amount of token1 to collect as fees. Defaults to 2**128 - 1.
+            deadline (int, optional): Unix timestamp after which the transactions will revert. Defaults to 5 minutes from the current block time.
 
         Returns:
-            dict: A summary of the operations performed with transaction hashes.
+            dict: A summary of the operations performed with transaction hashes for:
+                - "decrease_liquidity_tx": Transaction hash for decreasing liquidity.
+                - "collect_fees_tx": Transaction hash for collecting fees.
+                - "burn_nft_tx": Transaction hash for burning the NFT.
 
         Raises:
             RuntimeError: If any of the operations fail.
         """
         try:
-            self.logger.info(f"Closing liquidity position for Token ID: {self.nft_token_id}...")
-            result = {}
-
-            # Step 0: Unstake liquidity if any is staked
-            if self.is_staked and self.staked_liquidity > 0:
-                self.logger.info("Step 0: Unstaking liquidity...")
-                unstake_tx_hash = self.unstake_liquidity()
-                result["unstake_tx"] = unstake_tx_hash
+            self.logger.info(f"Closing liquidity position for Token ID: {nft_token_id}...")
+            if not public_address:
+                public_address = self.blockchain_connector.public_address            
 
             # Step 1: Decrease liquidity
             self.logger.info("Step 1: Decreasing liquidity...")
-            decrease_tx_hash = self.decrease_liquidity(amount0Min, amount1Min)
-            result["decrease_liquidity_tx"] = decrease_tx_hash
+            decrease_tx_hash = self.decrease_liquidity(nft_token_id, amount0Min, amount1Min)
+
+            time.sleep(3)
 
             # Step 2: Collect fees
             self.logger.info("Step 2: Collecting fees...")
-            collect_tx_hash = self.collect_fees(amount0Max, amount1Max)
-            result["collect_fees_tx"] = collect_tx_hash
+            collect_tx_hash = self.collect_fees(nft_token_id, public_address, amount0Max, amount1Max)
+
+            time.sleep(3)
 
             # Step 3: Burn the NFT
             self.logger.info("Step 3: Burning the NFT...")
-            burn_tx_hash = self.burn_nft()
-            result["burn_nft_tx"] = burn_tx_hash
+            burn_tx_hash = self.burn_nft(nft_token_id)
 
-            # Reset staking state
-            self.staked_liquidity = 0
-            self.is_staked = False
-
+            # Return a summary of the transactions
+            result = {
+                "decrease_liquidity_tx": decrease_tx_hash,
+                "collect_fees_tx": collect_tx_hash,
+                "burn_nft_tx": burn_tx_hash,
+            }
             self.logger.info(f"Liquidity position closed successfully")
             return result
 
@@ -477,7 +390,7 @@ class LiquidityManager:
             self.logger.error(f"Failed to close liquidity position: {e}")
             raise RuntimeError("Failed to close liquidity position.") from e
 
-    def decrease_liquidity(self, amount0Min=0, amount1Min=0):
+    def decrease_liquidity(self, nft_token_id, amount0Min=0, amount1Min=0):
         """
         Decreases liquidity for the position with the specified parameters.
 
@@ -498,13 +411,13 @@ class LiquidityManager:
         """
         try:
             # Retrieve current liquidity for the position
-            position = self.nft_contract.functions.positions(self.nft_token_id).call()
+            position = self.nft_contract.functions.positions(nft_token_id).call()
             current_liquidity = position[7]  # Liquidity amount
-            self.logger.info(f"Current liquidity for Token ID {self.nft_token_id}: {current_liquidity}")
+            self.logger.info(f"Current liquidity for Token ID {nft_token_id}: {current_liquidity}")
 
             # Prepare decrease parameters
             decrease_params = {
-                "tokenId": self.nft_token_id,
+                "tokenId": nft_token_id,
                 "liquidity": current_liquidity,
                 "amount0Min": amount0Min,
                 "amount1Min": amount1Min,
@@ -512,7 +425,7 @@ class LiquidityManager:
             }
 
             # Build and send the transaction
-            self.logger.info(f"Decreasing liquidity for Token ID: {self.nft_token_id}...")
+            self.logger.info(f"Decreasing liquidity for Token ID: {nft_token_id}...")
             decrease_function = self.nft_contract.functions.decreaseLiquidity(decrease_params)
             tx_hash, receipt = self.blockchain_connector.build_and_send_transaction(decrease_function)
 
@@ -523,7 +436,7 @@ class LiquidityManager:
             self.logger.error(f"Failed to decrease liquidity: {e}")
             raise RuntimeError("Failed to decrease liquidity.") from e
 
-    def collect_fees(self, amount0Max=2**128 - 1, amount1Max=2**128 - 1):
+    def collect_fees(self, nft_token_id, public_address=None, amount0Max=2**128 - 1, amount1Max=2**128 - 1):
         """
         Collects trading fees accrued by the liquidity position.
 
@@ -543,16 +456,18 @@ class LiquidityManager:
             RuntimeError: If collecting fees fails.
         """
         try:
+            if not public_address:
+                public_address = self.blockchain_connector.public_address
             # Prepare fee collection parameters
             collect_params = {
-                "tokenId": self.nft_token_id,
-                "recipient": self.blockchain_connector.public_address,
+                "tokenId": nft_token_id,
+                "recipient": public_address,
                 "amount0Max": amount0Max,
                 "amount1Max": amount1Max,
             }
 
             # Build and send the transaction
-            self.logger.info(f"Collecting fees for Token ID: {self.nft_token_id}...")
+            self.logger.info(f"Collecting fees for Token ID: {nft_token_id}...")
             collect_function = self.nft_contract.functions.collect(collect_params)
             tx_hash, receipt = self.blockchain_connector.build_and_send_transaction(collect_function)
 
@@ -563,7 +478,7 @@ class LiquidityManager:
             self.logger.error(f"Failed to collect fees: {e}")
             raise RuntimeError("Failed to collect fees.") from e
 
-    def burn_nft(self):
+    def burn_nft(self, nft_token_id):
         """
         Burns the NFT associated with the liquidity position.
 
@@ -580,8 +495,8 @@ class LiquidityManager:
         """
         try:
             # Build and send the transaction to burn the NFT
-            self.logger.info(f"Burning NFT for Token ID: {self.nft_token_id}...")
-            burn_function = self.nft_contract.functions.burn(self.nft_token_id)
+            self.logger.info(f"Burning NFT for Token ID: {nft_token_id}...")
+            burn_function = self.nft_contract.functions.burn(nft_token_id)
             tx_hash, receipt = self.blockchain_connector.build_and_send_transaction(burn_function)
 
             self.logger.info(f"NFT burned successfully. Transaction hash: {tx_hash}")

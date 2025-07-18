@@ -4,7 +4,7 @@ import time
 import logging
 from logging_config import setup_logging
 from utils.blockchain_connector import BlockchainConnector
-from utils.liquidity_manager import LiquidityManager
+from utils.liquidity_manager_v2 import LiquidityManager
 
 # Set up logging
 setup_logging()
@@ -119,7 +119,7 @@ def demo_liquidity_manager():
         raise Exception("Please provide sufficient amount of token to proceed.")
     logger.info(f"You have sufficient token in ETH, WETH, and USDC")
 
-    # Open the liquidity position using the above parameter
+    # 1. Open the liquidity position using the above parameter
     logger.info("\n")
     logger.info("-------------------------------------------------------------------------")
     logger.info("------------------------ Open Liquidity Position ------------------------")
@@ -135,27 +135,55 @@ def demo_liquidity_manager():
     logger.info(f"You invested {liquidity_manager.amount1} USDC")
     logger.info(f"The NFT token id that represents your ownership of this position is {liquidity_manager.nft_token_id}")
 
-    # Pause for 3 minutes. You can verify your position by going to https://aerodrome.finance/dash and connecting your wallet to aerodrome finance.
-    logger.info("\n")
-    logger.info("-------------------------------------------------------------------------")
-    logger.info("--------------------------- Check It Yourself ---------------------------")
-    logger.info("-------------------------------------------------------------------------")
-    logger.info(f"Pausing for 3 minutes")
-    logger.info(f"You can verify your position by going to https://aerodrome.finance/dash and connecting your wallet to aerodrome finance")
-    time.sleep(pause_time)
+    # ==========================================================================================
+    # ==========================================================================================
+    # 이제 필요한 것
+    # 해당 자산 stake 했을 때 해당 자산 범위
+    # 해당 자산 unstake 시 usdc, weth 각 수량
+    # 범위 체크 후 만약 out of range 혹은 내가 지정한 %의 범위를 넘겼을 때 해당 자산 자동 리밸런싱 진행
 
-    # Close the liquidity position using the above parameter
-    logger.info("\n")
-    logger.info("-------------------------------------------------------------------------")
-    logger.info("------------------------ Close Liquidity Position -----------------------")
-    logger.info("-------------------------------------------------------------------------")
-    logger.info(f"Closing the liquidity position...")
-    liquidity_manager.close_liquidity_position()
-    logger.info(f"Liquidity position closed")
+    # optional
+    # - rebalancing 했을 때 현재 aero stake 자산 + usdc, weth 얻는거 return 가능한지
+    # - earn aero 현재 token 별 수량 확인 가능한지 
+    # ==========================================================================================
+    # ========================================================================================== 
+    
+    # 2. 스테이킹된 자산 번호 조회
+    nft_token_ids = liquidity_manager.fetch_staked_liquidity_position_from_nft()
+    time.sleep(5)
 
+    # 3. 자산 번호 사용하여 해당 자산 stake 진행
+    for id in nft_token_ids:
+        liquidity_manager.stake_liquidity_position_from_nft(nft_token_id=id)
+        time.sleep(5)
+
+    # 4. 해당 stake gauge 자산 번호 조회
+    gauge_stake_token_ids = liquidity_manager.fetch_staked_liquidity_position_from_gauge()
+    time.sleep(5)
+
+    # 5. 해당 자산 unstake 진행
+    for id in gauge_stake_token_ids:
+        liquidity_manager.unstaked_liquidity_position_from_gauge(nft_token_id=id)
+        time.sleep(5)    
+    
+    time.sleep(5)
+    # 6. 해당 unstake 자산 재 조회
+    nft_token_ids = liquidity_manager.fetch_staked_liquidity_position_from_nft()
+    time.sleep(5)
+
+    # 7. 해당 unstake 자산 close 및 기존 hot wallet 재입금
+    for id in nft_token_ids:
+        logger.info("\n")
+        logger.info("-------------------------------------------------------------------------")
+        logger.info("------------------------ Close Liquidity Position -----------------------")
+        logger.info("-------------------------------------------------------------------------")
+        logger.info(f"Closing the liquidity position...")        
+        liquidity_manager.close_liquidity_position(nft_token_id=id)
+        logger.info(f"Liquidity position closed")
+    
     # Run the demo_blockchain_connector() again to check the balance change in your wallet
     # Note that by maintaining the liquidity position for three minutes, your balance probably will decrease a little.
-    demo_blockchain_connector()
+    # demo_blockchain_connector()
 
 if __name__ == "__main__":
     main()
